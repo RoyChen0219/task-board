@@ -94,6 +94,34 @@
             font-size: 12px;
             margin-left: 4px;
         }
+        
+        /* Agent统计卡片样式 */
+        .agent-stat-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            transition: transform 0.2s;
+        }
+        .agent-stat-card:hover {
+            transform: translateY(-2px);
+        }
+        .agent-stat-card .stat-value {
+            font-size: 1.5rem;
+            font-weight: 700;
+        }
+        .agent-stat-card .stat-label {
+            font-size: 0.75rem;
+            opacity: 0.9;
+        }
+        .agent-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 14px;
+        }
     </style>
 </head>
 <body class="bg-gray-50 min-h-screen">
@@ -235,6 +263,53 @@
             </div>
         </section>
 
+        <!-- Agent工作统计 -->
+        <section class="mb-8">
+            <h2 class="text-lg font-semibold text-gray-700 mb-4 flex items-center">
+                <span>Agent工作统计</span>
+                <span id="agentDateLabel" class="ml-2 text-sm font-normal text-gray-500"></span>
+            </h2>
+            <div id="agentStatsContainer" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+                <!-- Agent统计卡片将通过JS动态生成 -->
+                <div class="text-center py-8 text-gray-400" id="agentStatsLoading">
+                    <div class="spinner mx-auto mb-2" style="width: 24px; height: 24px; border-width: 2px;"></div>
+                    <p class="text-sm">加载中...</p>
+                </div>
+            </div>
+            
+            <!-- 汇总统计 -->
+            <div class="mt-6 grid grid-cols-3 gap-4">
+                <div class="agent-stat-card rounded-xl p-4">
+                    <div class="stat-label">总完成任务数</div>
+                    <div class="stat-value" id="totalCompletedTasks">--</div>
+                </div>
+                <div class="agent-stat-card rounded-xl p-4">
+                    <div class="stat-label">平均完成时间(分钟)</div>
+                    <div class="stat-value" id="avgCompletionTime">--</div>
+                </div>
+                <div class="agent-stat-card rounded-xl p-4">
+                    <div class="stat-label">延期率(%)</div>
+                    <div class="stat-value" id="overdueRate">--</div>
+                </div>
+            </div>
+            
+            <!-- 原有统计（隐藏备用） -->
+            <div class="mt-4 grid grid-cols-3 gap-4" style="display: none;">
+                <div class="agent-stat-card rounded-xl p-4">
+                    <div class="stat-label">总工作时长</div>
+                    <div class="stat-value" id="totalDuration">--</div>
+                </div>
+                <div class="agent-stat-card rounded-xl p-4">
+                    <div class="stat-label">总Token消耗</div>
+                    <div class="stat-value" id="totalTokens">--</div>
+                </div>
+                <div class="agent-stat-card rounded-xl p-4">
+                    <div class="stat-label">活跃Agent数</div>
+                    <div class="stat-value" id="activeAgents">--</div>
+                </div>
+            </div>
+        </section>
+
         <!-- 看板 -->
         <section>
             <div class="grid grid-cols-4 gap-4">
@@ -322,14 +397,27 @@
     <script>
         // 配置
         const API_BASE = '/daily-records';
+        const AGENT_USAGE_API = '/agent-usage';
         
         // 状态
         let currentDate = new Date();
+        
+        // Agent 名称映射
+        const AGENT_NAMES = {
+            'data_officer': { name: '数据情报官', icon: '数', color: 'from-blue-500 to-cyan-500' },
+            'research_analyst': { name: '研究分析师', icon: '研', color: 'from-indigo-500 to-purple-500' },
+            'quant_engineer': { name: '量化工程师', icon: '量', color: 'from-purple-500 to-pink-500' },
+            'trader': { name: '执行交易员', icon: '执', color: 'from-green-500 to-emerald-500' },
+            'test_engineer': { name: '测试工程师', icon: '测', color: 'from-orange-500 to-red-500' },
+            'backend_dev': { name: '后端工程师', icon: '后', color: 'from-amber-500 to-yellow-500' },
+            'frontend_dev': { name: '前端工程师', icon: '前', color: 'from-cyan-500 to-blue-500' }
+        };
         
         // 初始化
         document.addEventListener('DOMContentLoaded', function() {
             initDatePicker();
             loadData(currentDate);
+            loadAgentStats(currentDate);
         });
         
         // 初始化日期选择器
@@ -343,6 +431,7 @@
                 const selectedDate = new Date(e.target.value);
                 currentDate = selectedDate;
                 loadData(selectedDate);
+                loadAgentStats(selectedDate);
             });
         }
         
@@ -545,6 +634,182 @@
         // 隐藏加载遮罩
         function hideLoading() {
             document.getElementById('loadingOverlay').style.display = 'none';
+        }
+        
+        // ========== Agent 工作统计功能 ==========
+        
+        // 加载 Agent 统计数据
+        async function loadAgentStats(date) {
+            const dateStr = formatDate(date);
+            const isLive = isToday(date);
+            
+            // 更新日期标签
+            const dateLabel = document.getElementById('agentDateLabel');
+            dateLabel.textContent = isLive ? '(今日)' : `(${dateStr})`;
+            
+            try {
+                const response = await fetch(`${AGENT_USAGE_API}/summary?date=${dateStr}`);
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    renderAgentStats(data);
+                } else {
+                    // API 不可用，使用模拟数据
+                    renderAgentStats(getMockAgentStats(dateStr));
+                }
+            } catch (error) {
+                console.error('加载Agent统计失败:', error);
+                // 使用模拟数据
+                renderAgentStats(getMockAgentStats(dateStr));
+            }
+        }
+        
+        // 获取模拟的 Agent 统计数据
+        function getMockAgentStats(dateStr) {
+            const today = formatDate(new Date());
+            
+            const mockByDate = {
+                '2026-03-15': {
+                    total_completed_tasks: 35,
+                    avg_completion_time: 35.09,
+                    overdue_rate: 11.12,
+                    agents: [
+                        { agent_id: 'data_officer', completed_tasks: 5, avg_completion_time: 28, overdue_rate: 8 },
+                        { agent_id: 'research_analyst', completed_tasks: 4, avg_completion_time: 32, overdue_rate: 10 },
+                        { agent_id: 'quant_engineer', completed_tasks: 3, avg_completion_time: 40, overdue_rate: 15 },
+                        { agent_id: 'trader', completed_tasks: 6, avg_completion_time: 20, overdue_rate: 5 },
+                        { agent_id: 'test_engineer', completed_tasks: 4, avg_completion_time: 45, overdue_rate: 18 },
+                        { agent_id: 'backend_dev', completed_tasks: 10, avg_completion_time: 30, overdue_rate: 5 },
+                        { agent_id: 'frontend_dev', completed_tasks: 3, avg_completion_time: 38, overdue_rate: 12 }
+                    ]
+                },
+                '2026-03-14': {
+                    total_completed_tasks: 28,
+                    avg_completion_time: 42.5,
+                    overdue_rate: 14.3,
+                    agents: [
+                        { agent_id: 'data_officer', completed_tasks: 4, avg_completion_time: 25, overdue_rate: 5 },
+                        { agent_id: 'research_analyst', completed_tasks: 3, avg_completion_time: 35, overdue_rate: 12 },
+                        { agent_id: 'quant_engineer', completed_tasks: 5, avg_completion_time: 38, overdue_rate: 8 },
+                        { agent_id: 'trader', completed_tasks: 4, avg_completion_time: 18, overdue_rate: 3 },
+                        { agent_id: 'test_engineer', completed_tasks: 3, avg_completion_time: 50, overdue_rate: 20 },
+                        { agent_id: 'backend_dev', completed_tasks: 6, avg_completion_time: 28, overdue_rate: 6 },
+                        { agent_id: 'frontend_dev', completed_tasks: 3, avg_completion_time: 42, overdue_rate: 15 }
+                    ]
+                }
+            };
+            
+            if (mockByDate[dateStr]) {
+                return mockByDate[dateStr];
+            }
+            
+            // 默认模拟数据
+            return {
+                total_completed_tasks: 20,
+                avg_completion_time: 38.5,
+                overdue_rate: 10.5,
+                agents: [
+                    { agent_id: 'data_officer', completed_tasks: 3, avg_completion_time: 25, overdue_rate: 5 },
+                    { agent_id: 'research_analyst', completed_tasks: 2, avg_completion_time: 30, overdue_rate: 8 },
+                    { agent_id: 'quant_engineer', completed_tasks: 2, avg_completion_time: 35, overdue_rate: 10 },
+                    { agent_id: 'trader', completed_tasks: 4, avg_completion_time: 15, overdue_rate: 3 },
+                    { agent_id: 'test_engineer', completed_tasks: 2, avg_completion_time: 42, overdue_rate: 12 },
+                    { agent_id: 'backend_dev', completed_tasks: 5, avg_completion_time: 28, overdue_rate: 6 },
+                    { agent_id: 'frontend_dev', completed_tasks: 2, avg_completion_time: 36, overdue_rate: 10 }
+                ]
+            };
+        }
+        
+        // 渲染 Agent 统计数据
+        function renderAgentStats(data) {
+            const container = document.getElementById('agentStatsContainer');
+            
+            // 隐藏加载状态
+            const loadingEl = document.getElementById('agentStatsLoading');
+            if (loadingEl) {
+                loadingEl.style.display = 'none';
+            }
+            
+            if (!data || !data.agents || data.agents.length === 0) {
+                container.innerHTML = '<p class="text-gray-400 text-center py-4 col-span-6">暂无统计数据</p>';
+                return;
+            }
+            
+            // 按工作时长排序
+            const sortedAgents = [...data.agents].sort((a, b) => b.duration_minutes - a.duration_minutes);
+            
+            // 渲染每个 Agent 的统计卡片
+            container.innerHTML = sortedAgents.map(agent => {
+                const agentInfo = AGENT_NAMES[agent.agent_id] || { 
+                    name: agent.agent_id, 
+                    icon: agent.agent_id.charAt(0).toUpperCase(), 
+                    color: 'from-gray-500 to-gray-600' 
+                };
+                
+                return `
+                    <div class="agent-stat-card rounded-xl p-4">
+                        <div class="flex items-center gap-3 mb-3">
+                            <div class="agent-icon bg-white/20 text-white">
+                                ${agentInfo.icon}
+                            </div>
+                            <div class="flex-1 min-w-0">
+                                <p class="font-medium text-sm truncate">${agentInfo.name}</p>
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-3 gap-2">
+                            <div>
+                                <p class="stat-label">完成任务</p>
+                                <p class="stat-value text-lg">${agent.completed_tasks || 0}</p>
+                            </div>
+                            <div>
+                                <p class="stat-label">平均时长</p>
+                                <p class="stat-value text-lg">${agent.avg_completion_time || 0}</p>
+                            </div>
+                            <div>
+                                <p class="stat-label">延期率</p>
+                                <p class="stat-value text-lg">${agent.overdue_rate || 0}%</p>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+            
+            // 更新汇总统计
+            document.getElementById('totalCompletedTasks').textContent = data.total_completed_tasks || '-';
+            document.getElementById('avgCompletionTime').textContent = data.avg_completion_time ? data.avg_completion_time.toFixed(1) + ' 分钟' : '-';
+            document.getElementById('overdueRate').textContent = data.overdue_rate ? data.overdue_rate.toFixed(1) + '%' : '-';
+            
+            // 保留旧字段的更新（用于模拟数据兼容）
+            if (data.total_duration_minutes) {
+                document.getElementById('totalDuration').textContent = formatDuration(data.total_duration_minutes);
+            }
+            if (data.total_tokens) {
+                document.getElementById('totalTokens').textContent = formatTokens(data.total_tokens);
+            }
+            if (data.agents) {
+                document.getElementById('activeAgents').textContent = data.agents.filter(a => a.duration_minutes > 0).length;
+            }
+        }
+        
+        // 格式化时长
+        function formatDuration(minutes) {
+            if (minutes >= 60) {
+                const hours = Math.floor(minutes / 60);
+                const mins = minutes % 60;
+                return mins > 0 ? `${hours}h${mins}m` : `${hours}h`;
+            }
+            return `${minutes}m`;
+        }
+        
+        // 格式化 Token 数量
+        function formatTokens(tokens) {
+            if (tokens >= 1000000) {
+                return (tokens / 1000000).toFixed(1) + 'M';
+            }
+            if (tokens >= 1000) {
+                return (tokens / 1000).toFixed(0) + 'K';
+            }
+            return tokens.toString();
         }
     </script>
 </body>

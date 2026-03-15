@@ -87,6 +87,20 @@ def init_db():
             )
         """)
         
+        # Agent每日使用统计表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS agent_daily_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_name TEXT NOT NULL,
+                date TEXT NOT NULL,
+                duration_minutes INTEGER DEFAULT 0,
+                token_count INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(agent_name, date)
+            )
+        """)
+        
         conn.commit()
 
 # 启动时初始化数据库
@@ -171,6 +185,37 @@ class DailySummaryResponse(BaseModel):
     task_summary: dict
     member_summary: dict
     created_at: str
+
+# Agent 使用统计 Models
+class AgentUsageCreate(BaseModel):
+    agent_name: str
+    duration_minutes: int = 0
+    token_count: int = 0
+    completed_tasks: int = 0
+    avg_completion_time: float = 0.0
+    overdue_rate: float = 0.0
+
+class AgentUsageUpdate(BaseModel):
+    duration_minutes: Optional[int] = None
+    token_count: Optional[int] = None
+    completed_tasks: Optional[int] = None
+    avg_completion_time: Optional[float] = None
+    overdue_rate: Optional[float] = None
+
+class AgentUsageResponse(BaseModel):
+    id: int
+    agent_name: str
+    date: str
+    duration_minutes: int
+    token_count: int
+    completed_tasks: int
+    avg_completion_time: float
+    overdue_rate: float
+    created_at: str
+    updated_at: str
+    
+    class Config:
+        from_attributes = True
 
 # ==================== API Routes ====================
 
@@ -589,6 +634,187 @@ def get_daily_summary(date: str):
             "member_summary": member_summary,
             "created_at": record["created_at"]
         }
+
+# --- Agent Usage API ---
+
+@app.post("/agent-usage", response_model=AgentUsageResponse)
+def report_agent_usage(usage: AgentUsageCreate):
+    """上报 Agent 使用情况（累计更新）"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # 检查当天是否已有记录
+        cursor.execute(
+            "SELECT * FROM agent_daily_usage WHERE agent_name = ? AND date = ?",
+            (usage.agent_name, today)
+        )
+        existing = cursor.fetchone()
+        
+        if existing:
+            # 累加更新
+            new_duration = existing["duration_minutes"] + usage.duration_minutes
+            new_tokens = existing["token_count"] + usage.token_count
+            # 新指标取最新值（非累加）
+            new_completed_tasks = usage.completed_tasks if usage.completed_tasks > 0 else existing["completed_tasks"]
+            new_avg_time = usage.avg_completion_time if usage.avg_completion_time > 0 else existing["avg_completion_time"]
+            new_overdue_rate = usage.overdue_rate if usage.overdue_rate > 0 else existing["overdue_rate"]
+            cursor.execute(
+                """UPDATE agent_daily_usage 
+                   SET duration_minutes = ?, token_count = ?, updated_at = ?,
+                       completed_tasks = ?, avg_completion_time = ?, overdue_rate = ?
+                   WHERE agent_name = ? AND date = ?""",
+                (new_duration, new_tokens, datetime.now().isoformat(),
+                 new_completed_tasks, new_avg_time, new_overdue_rate,
+                 usage.agent_name, today)
+            )
+            conn.commit()
+            cursor.execute(
+                "SELECT * FROM agent_daily_usage WHERE agent_name = ? AND date = ?",
+                (usage.agent_name, today)
+            )
+            return dict(cursor.fetchone())
+        else:
+            # 新增记录
+            cursor.execute(
+                """INSERT INTO agent_daily_usage (agent_name, date, duration_minutes, token_count, completed_tasks, avg_completion_time, overdue_rate) 
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (usage.agent_name, today, usage.duration_minutes, usage.token_count,
+                 usage.completed_tasks, usage.avg_completion_time, usage.overdue_rate)
+            )
+            conn.commit()
+            record_id = cursor.lastrowid
+            cursor.execute("SELECT * FROM agent_daily_usage WHERE id = ?", (record_id,))
+            return dict(cursor.fetchone())
+
+@app.get("/agent-usage", response_model=List[AgentUsageResponse])
+def get_agent_usage(date: Optional[str] = None, agent_name: Optional[str] = None):
+    """按日期查询 Agent 使用统计"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        query = "SELECT * FROM agent_daily_usage WHERE 1=1"
+        params = []
+        
+        if date:
+            query += " AND date = ?"
+            params.append(date)
+        if agent_name:
+            query += " AND agent_name = ?"
+            params.append(agent_name)
+        
+        query += " ORDER BY date DESC, agent_name ASC"
+        
+        cursor.execute(query, params)
+        return [dict(row) for row in cursor.fetchall()]
+
+@app.get("/agent-usage/summary")
+def get_agent_usage_summary(date: Optional[str] = None):
+    """获取 Agent 使用汇总统计"""
+    if not date:
+        date = datetime.now().strftime("%Y-%m-%d")
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # 当日汇总
+        cursor.execute(
+            "SELECT * FROM agent_daily_usage WHERE date = ?",
+            (date,)
+        )
+        records = cursor.fetchall()
+        
+        if not records:
+            return {
+                "date": date,
+                "total_agents": 0,
+                "total_duration_minutes": 0,
+                "total_tokens": 0,
+                "total_completed_tasks": 0,
+                "avg_completion_time": 0.0,
+                "overdue_rate": 0.0,
+                "agents": []
+            }
+        
+        total_duration = sum(r["duration_minutes"] for r in records)
+        total_tokens = sum(r["token_count"] for r in records)
+        total_completed_tasks = sum(r["completed_tasks"] for r in records)
+        
+        # 计算加权平均完成时间
+        weighted_avg_time = 0.0
+        if total_completed_tasks > 0:
+            weighted_avg_time = sum(r["avg_completion_time"] * r["completed_tasks"] for r in records) / total_completed_tasks
+        
+        # 计算平均延期率
+        avg_overdue_rate = sum(r["overdue_rate"] for r in records) / len(records) if records else 0.0
+        
+        return {
+            "date": date,
+            "total_agents": len(records),
+            "total_duration_minutes": total_duration,
+            "total_tokens": total_tokens,
+            "total_completed_tasks": total_completed_tasks,
+            "avg_completion_time": round(weighted_avg_time, 2),
+            "overdue_rate": round(avg_overdue_rate, 2),
+            "agents": [dict(r) for r in records]
+        }
+
+@app.put("/agent-usage/{agent_name}", response_model=AgentUsageResponse)
+def update_agent_usage(agent_name: str, usage: AgentUsageUpdate, date: Optional[str] = None):
+    """手动更新 Agent 使用情况（覆盖模式）"""
+    if not date:
+        date = datetime.now().strftime("%Y-%m-%d")
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # 检查是否存在记录
+        cursor.execute(
+            "SELECT * FROM agent_daily_usage WHERE agent_name = ? AND date = ?",
+            (agent_name, date)
+        )
+        existing = cursor.fetchone()
+        
+        if not existing:
+            raise HTTPException(status_code=404, detail=f"No usage record found for {agent_name} on {date}")
+        
+        # 构建更新
+        updates = []
+        values = []
+        if usage.duration_minutes is not None:
+            updates.append("duration_minutes = ?")
+            values.append(usage.duration_minutes)
+        if usage.token_count is not None:
+            updates.append("token_count = ?")
+            values.append(usage.token_count)
+        if usage.completed_tasks is not None:
+            updates.append("completed_tasks = ?")
+            values.append(usage.completed_tasks)
+        if usage.avg_completion_time is not None:
+            updates.append("avg_completion_time = ?")
+            values.append(usage.avg_completion_time)
+        if usage.overdue_rate is not None:
+            updates.append("overdue_rate = ?")
+            values.append(usage.overdue_rate)
+        
+        if not updates:
+            raise HTTPException(status_code=400, detail="No fields to update")
+        
+        updates.append("updated_at = ?")
+        values.append(datetime.now().isoformat())
+        values.append(agent_name)
+        values.append(date)
+        
+        query = f"UPDATE agent_daily_usage SET {', '.join(updates)} WHERE agent_name = ? AND date = ?"
+        cursor.execute(query, values)
+        conn.commit()
+        
+        cursor.execute(
+            "SELECT * FROM agent_daily_usage WHERE agent_name = ? AND date = ?",
+            (agent_name, date)
+        )
+        return dict(cursor.fetchone())
 
 # --- Health Check ---
 
